@@ -1,0 +1,751 @@
+---
+title: Localización subcelular de proteínas
+  tipo I
+author: "Marc Bañuls Tornero"
+date: "31/12/2019"
+output:
+  pdf_document:
+    toc: TRUE
+  html_document:
+    toc: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, cache = TRUE)
+```
+
+```{r library, echo=FALSE, include=FALSE}
+require(class)
+require(caret)
+require(e1071)
+require(neuralnet)
+require(kernlab)
+require(C50)
+require(randomForest)
+```
+Importamos la tabla de datos **yeast.data** de manera que esté correctamente dividida en columnas:
+```{r}
+datos<-read.table("yeast.data", header = FALSE)
+```
+
+# Análisis de los datos y preparación general inicial
+
+Aunque en el enunciado de la PEC ya se han explicado los datos a tratar, realizaremos un análisis descriptivo de los datos:
+```{r}
+str(datos)
+summary(datos)
+```
+
+Como podemos observar, nos encontramos con una tabla de datos de `r ncol(datos)` columnas y `r nrow(datos)` registros. La primera columna sirve como identificador de la secuencia conteniendo el nombre definido en la base de datos SWISS-PROT, siendo por ello por lo que se trata de un factor. Los valores desde la columna 2 a la columna 9 se tratan de características de la secuencia analizada que pueden ayudar a determinar la localización subcelular de la secuencia proteica. Cada uno de estos vectores es de tipo numérico y observamos que ya están todos ellos normalizados (los valores se encuentran siempre entre 0 y 1). Finalmente en la última columna tenemos el lugar en el que se encuentra la secuencia determinada.   
+Para observar en que rango de valores se encuentran las distintas variables, podemos realizar un histograma de los datos:
+```{r}
+par(mfrow=c(3,3))
+hist(datos$V2, main = "Histograma de meg", xlab = "meg")
+hist(datos$V3, main = "Histograma de gvh", xlab = "gvh")
+hist(datos$V4, main = "Histograma de alm", xlab = "alm")
+hist(datos$V5, main = "Histograma de mit", xlab = "mit")
+hist(datos$V6, main = "Histograma de erl", xlab = "erl")
+hist(datos$V7, main = "Histograma de pox", xlab = "pox")
+hist(datos$V8, main = "Histograma de vac", xlab = "vac")
+hist(datos$V9, main = "Histograma de nuc", xlab = "nuc")
+```
+Con estos histogramas observamos que los valores de meg y gvh son muy similares entre ellos, tendiendo a tener valores de 0.5 aunque se encuentran dispersos entre 0.3 y 0.7. En la variable alm observamos que los valores también se acumulan mayoritáriamente en 0.5 aunque aquí no hay valores que superen el límite de 0.8. En el histograma de la variable mit observamos que la mayoría de las observaciones se encuentran en valores entre 0.2 y 0.3. En cambio, en la variable erl todos los valores se acumulan en 0.5 y en la variable pox todos los valores se acumulan en 0. En el histograma de vac observamos que esta variable tiende a estar en valores entre 0.4 y 0.6. Finalmente el histograma de nuc indica que sus valores suelen rondar por 0.2.   
+
+Además, otro análisis que podemos hacer es la observación de una posible correlación entre estas variables, pudiendo hacer un análisis rápido con la correlación de pearson. De esta manera, podemos deducir que valores pueden afectar a otros a la hora de saber la localización de la secuencia.
+
+```{r}
+cor(datos[,-c(1,10)])
+```
+Analizando los resultados de la correlación en todas las variables solo observamos una leve correlación que puede ser significativa entre estas variables. Concretamente hablando, se trata de que hay una correlación positiva de 0.58 entre la variable meg y la variable gvh. Respecto a las demás variables, no parece haber correlaciones significativas.
+
+Hay un par de factores a tratar antes de poder tener los datos preparados para los procesamientos iniciales de cada algoritmo. El primero de ellos es que observando el primer vector (el identificador) nos encontramos que el factor de este vector tiene menos niveles que número de registros existen. Por lo tanto podemos llegar a pensar que hay secuencias repetidas en esta base de datos, por lo que vamos a comprobar esto:
+```{r}
+length(unique(datos$V1)) == nrow(datos)
+```
+
+Esto indica que no todos los identificadores son únicos, y por lo tanto sí que hay algún identificador repetido. Si encontramos que sus características no difieren entre ellos, deberemos eliminar estos registros repetidos para evitar que los algoritmos utilicen datos repetidos, que pueden modificar el comportamiento de éstos.
+```{r}
+frecuencia <- data.frame(table(datos$V1))
+repetidos <- frecuencia[frecuencia$Freq > 1,]
+repetidos
+```
+
+Podemos observar con un par de valores repetidos si sus características se repiten o no. Para ello recogemos los dos primeros valores repetidos obtenidos en la variable `repetidos`:
+```{r}
+EF1A <- subset(datos, datos$V1 == "EF1A_YEAST")
+H3 <- subset(datos, datos$V1 == "H3_YEAST")
+str(EF1A)
+str(H3)
+```
+Habiendo realizado la función `str()` de ambos identificadores observamos que son exactamente iguales entre ellos, así que podemos suponer que todos los valores repetidos no nos serán de utilidad a la hora de crear posteriores modelos. Por ello, utilizaremos a partir de ahora una tabla con valores de identificador únicos.
+
+```{r}
+datos_u <- datos[!duplicated(datos$V1),]
+```
+
+Ahora que tenemos valores únicos, podemos modificar el vector de clasificación como se pide en el enunciado de la PEC. Para ello filtraremos las clases (y sus respectivos registros) que no se requieran.   
+Primero filtraremos por los clasificadores que queremos mantener:
+```{r}
+datos_final <- subset(datos_u, datos_u$V10 == "CYT" | datos_u$V10 == "ME1" | datos_u$V10 == "ME2" | datos_u$V10 == "ME3" | datos_u$V10 == "MIT" | datos_u$V10 == "NUC")
+str(datos_final)
+```
+
+Ahora combinaremos los clasificadores ME1, ME2 y ME3 en el clasificador MEM:
+```{r}
+datos_final$V10 <- factor(datos_final$V10, levels = c("CYT", "ME1", "ME2", "ME3", "MIT", "NUC"), labels = c("CYT", "MEM", "MEM", "MEM", "MIT", "NUC") )
+str(datos_final)
+summary(datos_final)
+```
+
+Utilizando las funciones `summary()` y `str()` en los datos preparados observamos que el vector de clasificación (V10) tiene ahora las 4 etiquetas que se necesitaban, con los valores de ME1, ME2 y ME3 en la misma etiqueta MEM.   
+
+Ahora podemos realizar unos gráficos y tablas para comprender mejor la distribución de los datos. Primero realizaremos un histograma de las clasificaciones para observar como de equilibrados estan los registros:
+
+```{r}
+plot(datos_final$V10, ylim = range(0,500), col = "orange", xlab = "Localización", ylab = "Cantidad", main = "Número de secuencias proteicas en cada localización")
+```
+
+Para observar esto en formato de tabla y en porcentajes:
+
+```{r}
+prop.table(table(datos_final$V10))
+```
+
+Observamos que hay una mayor representación de las secuencias proteicas del citoplasma y núcleo (32.3% y 31% respectivamente) en comparación a la membrana y mitocondria (18.8% y 17.7% respectivamente). Podemos tener en cuenta esto a la hora de interpretar los resultados obtenidos en los posteriores modelos, ya que podemos tener un underfitting en la clasificación de proteínas de membrana y mitocondriales.   
+Cabe mencionar que para la utilización de los distintos modelos descartaremos la columna que sirve de identificador y modificaremos la columna clasificadora como sea necesario para poder realizar cada modelo.
+
+# k-Nearest Neighbour
+
+
+## 1) Transformación de los datos
+Tenemos los valores en formato numérico  y ya normalizado, y los clasificadores se encuentran en formato de factores debidamente etiquetados, por lo que no es necesario procesar más los datos.   
+
+Realizamos la separación de los datos en train y test. Utilizaremos la semilla aleatoria "12345" y asignaremos el 67% de los datos a train y el restante 33% a test. Guardamos primero los valores sin etiquetas:
+
+```{r}
+set.seed(12345)
+separacion_datos<-sample(1:nrow(datos_final), nrow(datos_final)*0.67,replace = FALSE)
+
+train_knn<-datos_final[separacion_datos,2:9]
+test_knn<-datos_final[-separacion_datos,2:9]
+```
+
+Ahora guardamos las etiquetas de los datos de train y test (que se encuentran en la columna 10):
+```{r}
+train_label_knn<-datos_final[separacion_datos,10]
+test_label_knn<-datos_final[-separacion_datos,10]
+```
+
+## 2) Entrenar el modelo
+Para entrenar el modelo necesitamos saber que valor de K vamos a utilizar. Vamos a utilizar el método común para encontrar un valor bueno (aunque no implique el óptimo), que consiste en usar como valor la raíz cuadrada del número de registros en el modelo de train. Además se recomienda utilizar un valor impar para evitar empates en el entrenamiento. En nuestro caso tenemos `r nrow(train_knn)` registros, por lo que su raíz cuadrada es `r sqrt(nrow(train_knn))`. Por lo tanto para que sea impar utilizaremos una k = 29. También realizaremos modelos con una k = 27 y k = 31 para observar si existe overfitting o underfitting.
+
+```{r}
+set.seed(12345)
+knn29_datos<- knn(train= train_knn, test= test_knn, cl= train_label_knn, k= 29, prob= TRUE)
+```
+
+## 3) Evaluar y mejorar el rendimiento del modelo
+Realizamos la matriz de confusión para evaluar el rendimiento del modelo recién creado.   
+
+
+Matriz de confusión de una knn con k = 29
+```{r}
+confusionMatrix(knn29_datos, test_label_knn)
+```
+
+
+Observamos que el modelo knn con k= 29 tiene una precisión del 62%. Podemos considerar como baja esta precisión, así que podemos utilizar distintas knn para intentar mejorar el rendimiento del modelo. Probaremos el modelo con k = 27 y otro con k = 31 para saber que valor de k puede mejorar la precisión:
+
+```{r}
+set.seed(12345)
+knn27_datos<- knn(train= train_knn, test= test_knn, cl= train_label_knn, k= 27, prob= TRUE)
+knn31_datos<- knn(train= train_knn, test= test_knn, cl= train_label_knn, k= 31, prob= TRUE)
+```
+
+Matriz de confusión de una knn con k = 27
+```{r}
+confusionMatrix(knn27_datos, test_label_knn)
+```
+
+
+Matriz de confusión de una knn con k = 31
+```{r}
+confusionMatrix(knn31_datos, test_label_knn)
+```
+
+Observamos en las matrices de confusión que los tres modelos son muy similares entre ellos en todos los aspectos, aunque existe un pequeño aumento en la precisión del modelo a medida que aumentamos el valor de K. Igualmente como el valor de la precisión no aumenta significativamente y la sensibilidad y especificidad de los distintos clasificadores no varía en gran medida, podemos quedarnos con cualquiera de los tres modelos. Aun así, una precisión del modelo menor al 63% resulta pobre, por lo que no es recomendable utilizar este algoritmo en métodos o ámbitos donde las predicciones del modelo sean de gran importancia. 
+
+# Naive Bayes
+
+Como el algoritmo de Naive Bayes utiliza variables categóricas en vez de numéricas, debemos cambiar las variables numéricas de nuestra base de datos por variables categóricas. Como los valores numéricos ya están normalizados, podemos subdividir en grupos los valores según en que rango numérico se encuentren. 
+
+## 1) Transformación de los datos
+Hemos pensado en crear 5 grupos para todas las variables: "muy_baja" para valores entre 0-0.20, "baja" entre 0.21-0.40, "media" entre 0.41-0.60, "alta" entre 0.61-0.80, y "muy_alta" entre 0.81-1.00. De esta manera tendremos los niveles de reconocimiento de señal y los scores subdivididos correctamente en 5 grupos, permitiendo la aplicación del algoritmo. Para dividir en grupos la tabla según distintos puntos de corte utilizamos la función `cut()`
+```{r}
+datos_naive <- datos_final
+datos_naive<- as.data.frame(sapply(datos_naive[2:9],function(x) cut(x, breaks = c(0.00,0.20,0.40,0.60,0.80,1.00), include.lowest = TRUE, labels = c("muy_baja","baja","media","alta","muy_alta"))))
+```
+
+Observamos el resultado de la transformación:
+```{r}
+str(datos_naive)
+```
+Observamos que las variables numéricas se han convertido en variables categóricas (algunas columnas tienen menos de 5 niveles debido a que en los registros no se encuentran valores dentro de algún grupo). Cabe mencionar que en esta variable hemos hemos eliminado el identificador debido a que no es necesario. La columna con los clasificadores la podemos utilizar igualmente en el algoritmo aunque ahora se encuentre separada. Además, como ya es una variable categórica no necesita ser procesada.   
+
+Creamos los train y test datasets de los datos recién procesados y de las etiquetas:
+
+```{r}
+set.seed(12345)
+separacion_datos_naive<-sample(1:nrow(datos_naive), nrow(datos_naive)*0.67,replace = FALSE)
+
+train_naive<-datos_naive[separacion_datos_naive,]
+test_naive<-datos_naive[-separacion_datos_naive,]
+
+train_label_naive<-datos_final[separacion_datos,10]
+test_label_naive<-datos_final[-separacion_datos,10]
+```
+
+## 2) Entrenar el modelo
+Utilizamos Naive Bayes del paquete 'e1071' para entrenar al modelo:
+
+```{r}
+set.seed(12345)
+bayes_m<- naiveBayes(train_naive,train_label_naive, laplace = 0)
+```
+
+## 3) Evaluar y mejorar el rendimiento del modelo
+Realizamos la función de predicción para observar el rendimiento del modelo:
+
+```{r}
+test_pred<- predict(bayes_m,test_naive)
+```
+
+Ahora que tenemos la predicción del modelo, comparamos con los valores reales del test dataset con una matriz de confusión:
+
+```{r}
+confusionMatrix(test_pred,test_label_naive)
+```
+
+Observamos que la precisión general es baja, llegando casi al 50% de error. Observando más detenidamente los distintos clasificadores vemos que donde se producen menores problemas a la hora de predecir es en la clase MEM, puede que debido a una menor cantidad de muestras o que las señales producidas son más reconocibles que en las otras clases. También observamos que el mayor problema de predicción es la baja sensibilidad de las clases. Esto puede intentar mejorarse subdividiendo en más grupos los valores o poniendo el valor de Laplace en 1. Por lo tanto, probaremos estas dos propuestas de mejora:   
+
+### Laplace = 1
+Aumentamos el valor de Laplace a 1:
+```{r}
+set.seed(12345)
+bayes_m_1<- naiveBayes(train_naive,train_label_naive, laplace = 1)
+test_pred_1<- predict(bayes_m_1,test_naive)
+```
+
+Realizamos ahora la nueva matriz de confusión:
+```{r}
+confusionMatrix(test_pred_1,test_label_naive)
+```
+
+No se observa ningún cambio significativo en el rendimiento del modelo, así que el valor de Laplace no parece ser un factor que afecte en gran medida a este modelo.   
+
+### Separación en 10 grupos
+Ahora vamos a subdividir las variables numéricas en una mayor cantidad de grupos, separando cada 0.1. Etiquetamos los grupos del 1 al 10 para saber en que decimal se encuentran:
+
+```{r}
+datos_naive_2 <- datos_final
+datos_naive_2<- as.data.frame(sapply(datos_naive_2[2:9],function(x) cut(x, breaks = c(0.00,0.10,0.20,0.30,0.40,0.50,0.60,0.70,0.80,0.90,1.00), include.lowest = TRUE, labels = c("1","2","3","4","5","6","7","8","9","10"))))
+```
+
+Realizamos el train y test de los valores, sin necesidad de hacerlo de las etiquetas (ya tenemos la variable de la función anterior):
+```{r}
+train_naive_2<-datos_naive_2[separacion_datos_naive,]
+test_naive_2<-datos_naive_2[-separacion_datos_naive,]
+```
+
+Ahora creamos el modelo con los datos más subdivididos:
+```{r}
+set.seed(12345)
+bayes_m_2<- naiveBayes(train_naive_2,train_label_naive, laplace = 0)
+```
+
+```{r}
+test_pred_2<- predict(bayes_m_2,test_naive_2)
+```
+
+Obtenemos la nueva matriz de confusión:
+```{r}
+confusionMatrix(test_pred_2,test_label_naive)
+```
+
+Observamos una significativa mejora general, aumentando la precisión del 56% de los modelos anteriores al 59% en este modelo. Aunque sigue siendo una precisión baja, se ha mejorado el rendimiento del modelo, indicando que si aumentamos el número de grupos facilita un correcto entrenamiento.   
+
+También podemos probar a realizar el entrenamiento del modelo a partir de los valores numéricos. La función permite el uso de variables numéricas pero no es lo recomendable, ya que se asume que los valores siguen una distribución gaussiana, siendo posible que no sea el caso. Por ello, consideramos que este último modelo realizado es el que mejor rendimiento tiene.
+
+# Artificial Neural Network
+Para utilizar el algoritmo de ANN debemos tener en la tabla de datos una columna para cada clasificador, es decir, una columna para cada localización de la secuencia (CYT, MEM, MIT y NUC).
+
+## 1) Transformación de los datos
+Descartaremos la variable identificadora de la secuencia (V1) y crearemos 4 columnas (una para cada tipo de clasificador) donde se indicará con TRUE o FALSE si la secuencia está localizada o no en esa localización. Posteriormente eliminaremos la columna de clasificadores original.
+```{r}
+datos_ann <- datos_final[-1]
+datos_ann$CYT <- datos_ann$V10 == "CYT" 
+datos_ann$MEM <- datos_ann$V10 == "MEM"
+datos_ann$MIT <- datos_ann$V10 == "MIT"
+datos_ann$NUC <- datos_ann$V10 == "NUC"
+datos_ann <- datos_ann[-9] #Eliminamos la columna con los 4 clasificadores juntos
+```
+
+Observamos como ha quedado el dataframe:
+```{r}
+str(datos_ann)
+```
+
+Tenemos las 8 variables numéricas esperadas y ahora los clasificadores se encuentran separados en cuatro columnas distintas y indicados con los valores logísticos TRUE (sí que se localiza en este lugar) y FALSE (no se localiza en este lugar).   
+
+Hacemos la selección de datos, 67% para train dataset y 33% para el test dataset:   
+
+```{r}
+set.seed(12345)
+separacion_datos_ann<-sample(1:nrow(datos_ann), nrow(datos_ann)*0.67,replace = FALSE)
+```
+   
+   
+Creamos dos variables para guardar los datos seleccionados para el train dataset y test dataset:   
+
+```{r}
+train_ann<-datos_ann[separacion_datos_ann,]
+test_ann<-datos_ann[-separacion_datos_ann,]
+```
+
+## 2) Entrenar el modelo
+
+Utilizamos el paquete `neuralnet` para crear el modelo. Vamos a realizar el modelo con 5 nodos ocultos:
+```{r}
+set.seed(12345)
+ann_m_5<- neuralnet(CYT+MEM+MIT+NUC ~ ., data = train_ann,hidden = 5,linear.output = FALSE )
+```
+
+Podemos visualizar el modelo:
+```{r}
+plot(ann_m_5)
+```
+
+Ahora podemos realizar la evaluación del modelo comparándolo con los resultados del test dataset (recogemos el valor de probabilidad de ser clasificado en cada caso, guardado en la variable "net.result"):
+```{r}
+ann_m_5_result<- compute(ann_m_5,test_ann[,1:8])$net.result
+```
+
+Creamos una función que nos permita transformar el output binario en output categórico:
+```{r}
+maxidx <- function(arr) {
+  return(which(arr == max(arr)))
+}
+```
+
+Aplicamos la función recién creada en los resultados del modelo:
+
+```{r}
+transf_ann_m_5<-apply(ann_m_5_result, 1, maxidx)
+```
+
+Realizamos la predicción con los resultados anteriores:
+
+```{r}
+predicted_ann_m_5<- c("CYT","MEM","MIT","NUC")[transf_ann_m_5]
+```
+
+## 3) Evaluar y mejorar el rendimiento del modelo
+
+
+Realizamos la matriz de confusión para evaluar el rendimiento del modelo:
+```{r}
+confusionMatrix(table(predicted_ann_m_5,datos_final$V10[-separacion_datos_ann]))
+```
+
+Observamos que utilizando 5 nodos ocultos obtenemos un 64% de precisión del modelo, siendo la predicción de CYT y de NUC los que menor precisión tienen y la predicción de MEM la que mejor porcentaje de precisión obtiene. El rendimiento del modelo es bastante más elevado que en algoritmos anteriores, pero sigue teniendo un rendimiento bajo.   
+
+Para intentar mejorar el rendimiento del modelo podemos aumentar el número de nodos ocultos. Por ello, vamos a crear dos modelos nuevos, uno con 3 nodos ocultos y otro con 8 nodos ocultos. De esta manera observaremos si el rendimiento del modelo tiende a aumentar o disminuir según el número de nodos ocultos.   
+
+### 3 nodos ocultos
+
+Utilizamos el paquete `neuralnet` para crear el modelo. Vamos a realizar el modelo con 3 nodos ocultos:
+```{r}
+set.seed(12345)
+ann_m_3<- neuralnet(CYT+MEM+MIT+NUC ~ ., data = train_ann,hidden = 3,linear.output = FALSE)
+```
+
+Podemos visualizar el modelo:
+```{r}
+plot(ann_m_3)
+```
+
+Ahora podemos realizar la evaluación del modelo comparándolo con los resultados del test dataset (recogemos el valor de probabilidad de ser clasificado en cada caso, guardado en la variable "net.result"):
+```{r}
+ann_m_3_result<- compute(ann_m_3,test_ann[,1:8])$net.result
+```
+
+Aplicamos la función recién creada en los resultados del modelo:
+
+```{r}
+transf_ann_m_3<-apply(ann_m_3_result, 1, maxidx)
+```
+
+Realizamos la predicción con los resultados anteriores:
+
+```{r}
+predicted_ann_m_3<- c("CYT","MEM","MIT","NUC")[transf_ann_m_3]
+```
+
+Realizamos la matriz de confusión para evaluar el rendimiento del modelo:
+```{r}
+confusionMatrix(table(predicted_ann_m_3,datos_final$V10[-separacion_datos_ann]))
+```
+
+Observamos una leve disminución en el rendimiento del modelo, por lo que intentaremos ahora aumentar el número de nodos ocultos a 8:
+
+### 10 nodos ocultos y threshold = 0.05
+Ahora realizamos el modelo con 10 nodos ocultos, teniendo que aumentar el umbral de error a 0.05 para que el algoritmo no sea demasiado costoso computacionalmente (si no ponemos este threshold llega al valor máximo de stepmax, si subimos en gran medida el valor de stepmax el coste computacional será elevado):
+```{r}
+set.seed(12345)
+ann_m_10<- neuralnet(CYT+MEM+MIT+NUC ~ ., data = train_ann,hidden = 10,linear.output = FALSE, threshold = 0.05)
+```
+
+Podemos visualizar el modelo:
+```{r}
+plot(ann_m_10)
+```
+
+Ahora podemos realizar la evaluación del modelo comparándolo con los resultados del test dataset (recogemos el valor de probabilidad de ser clasificado en cada caso, guardado en la variable "net.result"):
+```{r}
+ann_m_10_result<- compute(ann_m_10,test_ann[,1:8])$net.result
+```
+
+Aplicamos la función recién creada en los resultados del modelo:
+
+```{r}
+transf_ann_m_10<-apply(ann_m_10_result, 1, maxidx)
+```
+
+Realizamos la predicción con los resultados anteriores:
+
+```{r}
+predicted_ann_m_10<- c("CYT","MEM","MIT","NUC")[transf_ann_m_10]
+```
+
+Realizamos la matriz de confusión para evaluar el rendimiento del modelo:
+```{r}
+confusionMatrix(table(predicted_ann_m_10,datos_final$V10[-separacion_datos_ann]))
+```
+
+Observamos que la precisión ha aumentado ligeramente si comparamos la precisión global con el modelo de 5 nodos ocultos (una diferencia de un 1%). Este modelo se puede considerar mejor que el anterior debido al ligero aumento en su rendimiento sin aumentar su coste computacional. Al intentar aumentar el número de nodos a más de 10, era necesario un aumento del umbral de error y el aumento de pasos necesarios para generar el modelo, lo cual resultaba en un aumento en el coste computacional. Igualmente, entre 5 y 10 nodos no ha aumentado el rendimiento del modelo suficientemente como para recomendar la utilización de modelos con mayor número de nodos en los datos utilizados en este PEC.
+
+# Support Vector Machine
+
+Para el algoritmo de SVM necesitamos que todas las variables excepto los clasificadores (que permanecen como factores, variables categóricas) sean numéricas, por lo que podemos utilizar directamente los datos iniciales sin procesar. Además, los valores numéricos deben estar normalizados, y los nuestros (como ya hemos dicho anteriormente) ya se encuentran normalizados correctamente. Cabe mencionar que también eliminaremos el primer vector identificador debido a que no es necesario en el algoritmo.
+
+## 1) Transformación de los datos
+Eliminamos el primer vector identificador para tener la tabla de datos preparada:
+```{r}
+datos_svm <- datos_final[-1]
+str(datos_svm)
+```
+
+Realizamos la división de los datos en train y test:
+```{r}
+set.seed(12345)
+separacion_datos_svm<-sample(1:nrow(datos_svm), nrow(datos_svm)*0.67,replace = FALSE)
+```
+   
+   
+Creamos dos variables para guardar los datos seleccionados para el train dataset y test dataset:   
+
+```{r}
+train_svm<-datos_svm[separacion_datos_svm,]
+test_svm<-datos_svm[-separacion_datos_svm,]
+```
+
+
+## 2) Entrenar el modelo
+
+Utilizamos la función `ksvm()` del paquete `kernlab` para entrenar el modelo SVM mediante el kernel 'vanilladot', que consiste en el algoritmo lineal de SVM:
+```{r}
+set.seed(12345)
+svm_m_linear <- ksvm(V10 ~ ., data = train_svm, kernel = "vanilladot")
+```
+
+Ahora utilizamos la función `predict()` para utilizar el modelo recién entrenado para predecir el test dataset:
+```{r}
+predicted_svm_m_linear <- predict(svm_m_linear, test_svm[1:8])
+```
+
+
+## 3) Evaluar y mejorar el rendimiento del modelo
+Realizamos ahora la matriz de confusión para observar el rendimiento del modelo:
+```{r}
+confusionMatrix(predicted_svm_m_linear, test_svm$V10)
+```
+
+La precisión general del modelo es de un 63%, y observamos que de manera general la precisión de cada clase es mayor a un 65%, por lo que la predicción aún no ser especialmente buena da buenos resultados. Los mayores problemas encontrados son la baja sensibilidad en la clase MIT y NUC (55% y 40% respectivamente).
+
+Para intentar mejorar el modelo podemos utilizar el kernel 'rbf' nombrado en la función 'rbfdot'.
+
+### kernel rbf
+
+Vamos a utilizar el kernel rbf y comparar los resultados:
+```{r}
+set.seed(12345)
+svm_m_rbf <- ksvm(V10 ~ ., data = train_svm, kernel = "rbfdot")
+```
+
+Ahora utilizamos la función `predict()` para utilizar el modelo recién entrenado para predecir el test dataset:
+```{r}
+predicted_svm_m_rbf <- predict(svm_m_rbf, test_svm[1:8])
+```
+
+Realizamos ahora la matriz de confusión para observar el rendimiento del modelo:
+```{r}
+confusionMatrix(predicted_svm_m_rbf, test_svm$V10)
+```
+
+Observamos que el rendimiento global del modelo ha disminuido en un 1% respecto al modelo en que se utiliza el kernel lineal. Comparando las estadísticas por clase entendemos que esta disminución de la precisión es debida a que hay una disminución en la sensibilidad significativa en todas las clases
+
+# Arbol de Decisión
+
+Para utilizar el algoritmo del Árbol de decisión los datos pueden ser tanto nominales como numéricos. Al tener los datos preparados como numéricos, ya se encuentran preparados para su utilización en el modelo . También al basarnos en un árbol de decisiones, no es necesario normalizar los datos aunque éstos ya se encuentran normalizados.
+
+## 1) Transformación de los datos
+
+Los datos ya se encuentran listos para su uso, pero eliminamos la primera columna (con datos identificadores) debido a que no es necesaria:
+```{r}
+datos_tree <- datos_final[-1]
+```
+
+Para este algoritmo debemos tener los clasificadores separados de los otros valores en los train y test datasets. Creamos los train y test datasets basándonos en esto:
+
+```{r}
+set.seed(12345)
+separacion_datos_tree<-sample(1:nrow(datos_tree), nrow(datos_tree)*0.67,replace = FALSE)
+```
+
+```{r}
+train_tree <- datos_svm[separacion_datos_svm,1:8]
+test_tree <- datos_svm[-separacion_datos_svm,1:8]
+```
+
+```{r}
+train_tree_label <- datos_svm[separacion_datos_svm,9]
+test_tree_label <- datos_svm[-separacion_datos_svm,9]
+```
+
+
+## 2) Entrenar el modelo
+
+Para entrenar el modelo vamos a utilizar el algoritmo de arbol de decisión c5.0 utilizando la función `c5.0()` que obtenemos del paquete `C50`:
+
+```{r}
+set.seed(12345)
+tree_m<- C5.0(train_tree,train_tree_label)
+```
+
+Podemos observar las decisiones del modelo en su clasificación:
+```{r}
+summary(tree_m)
+```
+Observamos el distinto nivel de importancia de los datos proporcionados, siendo los valores del vector 4 (la puntuación de ALOM) el que ha tenido un 100% de importancia durante la creación del árbol de decisión. Además, el modelo ha calculado el porcentaje de error durante el entrenamiento, siendo el 18.8%.   
+
+Ahora utilizamos la función `predict()` para utilizar el modelo recién entrenado para predecir el test dataset:
+
+```{r}
+predicted_tree_m <- predict(tree_m,test_tree)
+```
+
+## 3) Evaluar y mejorar el rendimiento del modelo
+
+Para observar el rendimiento del modelo realizamos la matriz de confusión de los datos predecidos:
+```{r}
+confusionMatrix(predicted_tree_m, test_tree_label)
+```
+El modelo tiene una precisión global del 60% lo cual (como se ha mencionado en los modelos anteriores) es un poco bajo. El modelo tiene esta precisión debido principalmente a la baja especificidad de las clases MIT y NUC, las cuales rondan por el 50%. En la matriz de confusión observamos también que la clase CYT tiene un alto número de predicciones erróneas debido a que cree que 55 valores pertenecen a la clase NUC, provocando esta disminución de la precisión en la clase.   
+
+Para intentar obtener una mejora del modelo utilizando este algoritmo, se plantea utilizar un "boosting" de valor 10 para aumentar el número árboles de decisión creados.En el anterior modelo el atributo de boosting no se ha especificado y por tanto ha utilizado su valor estándar (1). Este atributo se puede modificar añadiendo el atributo `trial` en el modelo.
+
+### trials = 10
+
+Realizamos un modelo con un boosting de valor 10 (10 trials):
+```{r}
+set.seed(12345)
+tree_m_10<- C5.0(train_tree,train_tree_label, trials = 10)
+```
+
+Observamos el nuevo árbol creado por este modelo:
+
+```{r}
+summary(tree_m_10)
+```
+
+En este nuevo modelo observamos que se da una mayor importancia a todos los datos de manera general.   
+
+
+Ahora realizamos la predicción utilizando el modelo recién creado:
+```{r}
+predicted_tree_m_10 <- predict(tree_m_10,test_tree)
+```
+
+Finalmente observamos el rendimiento del nuevo modelo con otra matriz de confusión
+```{r}
+confusionMatrix(predicted_tree_m_10, test_tree_label)
+```
+
+Comparando este modelo con el anterior no se encuentran diferencias significativas en su rendimiento, por lo que la adición de 10 árboles de decisión no parece mejorar el rendimiento del modelo para nuestros datos.   
+
+### Modelo random forest
+
+Para intentar mejorar el modelo del Árbol de decisión, ahora utilizaremos el paquete `randomForest` para utilizar el modelo de random forest. En este modelo realizaremos 500 árboles de decisión (el valor estándar) y en cada partición del árbol de decisión se seleccionarán 2 características (esto se hace de manera automática recogiendo como estándar la raíz cuadrada de las características totales y redondeando por lo bajo, en este caso 8).
+```{r}
+set.seed(12345)
+rf_m <- randomForest(train_tree, train_tree_label, ntree = 500)
+```
+
+Ahora podemos observar el resumen del modelo:
+```{r}
+rf_m
+```
+Observamos que el error estimado es del 36.5%, además de los porcentajes de error dividido por clase. De esta manera sabemos que las clases MIT y NUC serán las más propensas a reducir la precisión del modelo.
+
+Realizamos ahora la predicción del test dataset:
+```{r}
+predicted_rf_m <- predict(rf_m,test_tree)
+```
+
+Finalmente realizamos la matriz de confusión de este modelo:
+```{r}
+confusionMatrix(predicted_rf_m, test_tree_label)
+```
+
+En el modelo de random forest observamos que la precisión global es del 67%. Este modelo es significativamente mejor que el modelo de Árbol de decisión utilizado anteriormente. Comparando de manera más detallada, observamos un aumento significativo en la sensibilidad de la clase CYT junto con un aumento leve de las clases MEM y NUC. Respecto a la especificidad, se observa un aumento significativo en las clases MIT y NUC y una leve disminución en las clases CYT y MEM. En las precisiones balanceadas de las clases observamos también un aumento significativo en todas ellas en este nuevo modelo, siendo el aumento más destacado la clase CYT. 
+
+# Conclusiones 
+
+Ahora vamos a comentar los resultados de todos los modelos utilizados, de menor rendimiento a mayor.   
+
+El modelo con el peor rendimiento ha sido el modelo en el que se ha utilizado el algoritmo de Naive Bayes. En este caso el mejor rendimiento del modelo es del 59%, donde habíamos dividido los datos en 10 grupos. En este caso suponemos que este modelo en principio no está pensado para los datos a predecir, ya que no hemos tenido que procesar los datos de más al tener las características como numéricas.   
+
+El siguiente modelo que encontramos es el que utiliza el algoritmo del árbol de decisión, donde el rendimiento de este es del 60%. Los problemas que pueden haberse encontrado en este modelo son principalmente el peso que se le daba a cada característica a la hora de realizar cada árbol de decisión.   
+
+El modelo en el que se utiliza el algoritmo de K-NN ha obtenido una precisión del 62%, siendo el parámetro más preciso el que tiene una k = 29. Al intentar aumentar o disminuir este valor hemos observado que empezaba a disminuir el rendimiento del modelo, por lo que esta es la máxima precisión que se puede alcanzar en este algoritmo. Este algoritmo tiene como ventaja que es rápido y fácil de implementar, pero al tener un bajo nivel de características ha disminuido consecuentemente la precisión del modelo de manera significativa.   
+
+El modelo que utiliza el algoritmo de SVM y el kernel lineal ha obtenido una precisión del 63%, lo cual lo hace el tercer mejor modelo de esta PEC. En este PEC hemos probado los kernels lineal y radial, teniendo el kernel lineal un ligeramente mejor rendimiento, pero con un mayor conocimiento sobre los distintos kernels y los parámetros de este algoritmo, creo que se podría obtener un aumento significativo del rendimiento de este modelo.
+
+El modelo en el que se utiliza la red neuronal artificial (ANN) tiene un rendimiento del 65% cuando hemos utilizado 10 nodos ocultos y modificado el umbral de error al 0.5. En este modelo de 10 nodos ocultos no tiene un coste computacional elevado pero requiere de casi 60000 pasos para realizar el modelo, por lo que estamos frente a un coste computacional significativo. Intentando aumentar el número de nodos requiere aumentar el límite máximo de pasos para crear el modelo o aumentar el umbral de error. Aumentando el límite máximo de pasos da lugar a un coste computacional que va aumentando exponencialmente según el mayor número de pasos realizados. En cambio, si aumentamos el umbral de error, el coste computacional no se vería afectado pero sí disminuiría la precisión del modelo conforme fueramos aumentando este umbral. Por lo tanto, este modelo tiene un margen de mejora para aumentar su precisión y rendimiento, pero a costa de un mayor tiempo de creación de este.   
+
+Finalmente, el modelo que mejor resultado nos ha dado, es decir, el modelo con mejor rendimiento, ha sido el que utiliza el algoritmo de random forests, obteniendo un 67% de precisión. Este modelo ha tenido un coste computacional muy bajo para el buen resultado obtenido de casi un 70%. Aun así, en términos generales no hemos conseguido encontrar un modelo con una precisión del 70% o mayor. Esto puede ser debido a la falta de registros para el train dataset o la necesidad de más variables de características para aumentar el número de factores que puedan relacionarse con cada localización de la secuencia. Otro factor que puede haber afectado es la posible varianza de los resultados y el propio margen de error en cada variable, ya que las variables de reconocimiento de señal y las puntuaciones o scores de cada secuencia no sabemos si han sido correctamente obtenidas o que reflejen el resultado real (no sabemos si se ha realizado el triplicado de cada señal para obtener su media, por ejemplo).   
+
+Como conclusión final, decir que el mejor modelo utilizado en la PEC ha sido el random forest con un 67% de precisión.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
